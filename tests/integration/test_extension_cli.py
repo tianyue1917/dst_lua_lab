@@ -10,13 +10,14 @@ from dst_lua_lab import cli
 from dst_lua_lab.config import EXIT_OK, RunConfig
 
 
-@pytest.mark.parametrize("profile", ["frontend", "server-sim"])
-def test_run_parser_rejects_unimplemented_profiles(profile: str) -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        cli.build_parser().parse_args(
-            ["run", "--profile", profile, "--source", "return 1"]
-        )
-    assert exc_info.value.code == 2
+@pytest.mark.parametrize(
+    "profile", ["algorithm", "modload", "frontend", "server-sim"]
+)
+def test_run_parser_accepts_implemented_profiles(profile: str) -> None:
+    args = cli.build_parser().parse_args(
+        ["run", "--profile", profile, "--source", "return 1"]
+    )
+    assert args.profile == profile
 
 
 def test_core_run_uses_core_namespace_and_records_management_plan() -> None:
@@ -98,3 +99,20 @@ def test_clean_rejects_traversal_id(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
     with pytest.raises(ValueError, match="extension id"):
         cli.clean_case_generated("../outside")
+
+
+def test_launch_worker_rejects_symlinked_report_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    lab = tmp_path / "lab"
+    lab.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (lab / "reports").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this host")
+    monkeypatch.setattr(cli, "PROJECT_ROOT", lab)
+    with pytest.raises(ValueError, match="symlink or reparse"):
+        cli.launch_worker(RunConfig(source="return 1"), 5)
+    assert list(outside.iterdir()) == []

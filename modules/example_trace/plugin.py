@@ -1,4 +1,4 @@
-"""Inert example entry point for the management-only extension milestone."""
+"""Synthetic Extension API v1 entry point."""
 
 
 def register(context):

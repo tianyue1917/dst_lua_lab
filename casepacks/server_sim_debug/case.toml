@@ -1,0 +1,17 @@
+schema = 1
+id = "server_sim_debug"
+name = "Server simulation DST mod debugging"
+version = "1.0.0"
+api_version = "1"
+required_modules = [
+  "dst_runtime_baseline",
+  "strict_env",
+  "rpc_capture",
+  "persistence_trace",
+  "scheduler_trace",
+]
+optional_modules = []
+profiles = ["server-sim"]
+
+[match]
+required_files = []

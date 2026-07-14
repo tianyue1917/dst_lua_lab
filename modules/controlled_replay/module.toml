@@ -1,0 +1,10 @@
+schema = 1
+id = "controlled_replay"
+name = "Explicit controlled callback replay"
+version = "1.0.0"
+api_version = "1"
+priority = 300
+dependencies = ["dst_runtime_baseline"]
+conflicts = []
+profiles = ["modload", "frontend", "server-sim"]
+entry = "plugin.py"

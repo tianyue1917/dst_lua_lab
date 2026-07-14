@@ -18,6 +18,9 @@ Every persistence operation targets the Lab's isolated in-memory backend.
 | `world_entity_rpc` | world/entity/tag/event/RPC identity and offline sends | fixture events and `network_access=false` |
 | `world_unknown_native` | strict fallback for an unknown `TheNet` method | exit 3 and `unsupported.json` |
 | `scoped_io` | read-only access inside the selected MOD root | file-read trace, unchanged source tree, rejected write |
+| `profile_roles` | distinct frontend and dedicated server role fixtures | profile-specific world/net/player assertions |
+| `known_mod_index` | selected MOD identity and read-only modinfo queries | traceable `KnownModIndex` events |
+| `controlled_replay` | five explicit callback replay kinds | no implicit execution, replay trace and after-run summary |
 
 The integration contract is in
 `tests/integration/test_modload_fixture_corpus.py`. The Worker now advertises
@@ -60,6 +63,10 @@ copy or identify either MOD.
   read-only MOD/dependency file access.
 - Real DST constants/tuning/strings plus immutable modinfo configuration
   defaults.
+- Explicit frontend and dedicated server roles with different `TheNet`, world,
+  player and hosted/dedicated flags.
+- Opt-in controlled replay for exact Prefab/component post-init, Prefab
+  constructor, MOD RPC and Stategraph callbacks.
 
 ### Remaining P0: controlled execution boundaries
 
@@ -67,19 +74,17 @@ copy or identify either MOD.
    profile does not automatically follow `PrefabFiles` and execute every
    `scripts/prefabs/*.lua`; this must be an explicit opt-in because prefab
    constructors can greatly expand native requirements.
-2. **Hook callback replay.** Registered prefab, component, player, class, and
-   sim hooks are counted but not invoked against controlled fixture objects.
-   Representative registrations: prefab post-init 125, component post-init 69,
-   class post-construct 27. A run can currently report success even when the
-   callback body contains a missing native or Lua error.
+2. **Wider Hook replay.** Prefab/component post-init is covered by explicit
+   plans; player, class, sim and world lifecycle hooks still need finite
+   scenario fixtures before they can be replayed safely.
 3. **Component/replica depth.** The baseline supplies containers and basic
    objects, not the behavior of every gameplay component or classified netvar.
 
 ### P1: common environment and lifecycle fidelity
 
-1. Add scenario fixtures for server/client, dedicated/listen server,
-   `TheWorld.ismastersim`, cave/forest shard, and frontend-only mod paths.
-2. Add deterministic event dispatch (`ListenForEvent`, `PushEvent`,
+1. Add cave/forest shard and listen-server variations beyond the current
+   frontend, hosted modload and dedicated server roles.
+2. Extend deterministic event dispatch (`ListenForEvent`, `PushEvent`,
    `RemoveEventCallback`) and component/replica fixture injection before hook
    replay.
 3. Validate dependency ambiguity and target-over-dependency precedence with a

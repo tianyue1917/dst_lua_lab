@@ -24,6 +24,7 @@ class RunConfig:
     max_trace_events: int = 10000
     case_id: str | None = None
     requested_modules: list[str] = field(default_factory=list)
+    replay_plan: list[dict[str, Any]] = field(default_factory=list)
     extension_plan: dict[str, Any] = field(default_factory=dict)
     management_only: bool = True
 

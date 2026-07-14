@@ -11,7 +11,7 @@ required_modules = [
   "scheduler_trace",
 ]
 optional_modules = []
-profiles = ["algorithm", "modload"]
+profiles = ["modload"]
 
 [match]
 required_files = []

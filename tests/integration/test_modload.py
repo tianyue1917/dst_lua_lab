@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from dst_lua_lab.cli import PROJECT_ROOT, file_sha256, launch_worker
 from dst_lua_lab.config import EXIT_MISSING_NATIVE, EXIT_OK, RunConfig
 
@@ -175,3 +177,35 @@ assert(not callback_ran)
     assert by_api["AddUserCommand"]["target"] == "fixture_command"
     result = json.loads((report / "result.json").read_text("utf-8"))
     assert result["registrations_captured"] == 16
+
+
+@pytest.mark.parametrize("runtime", ["lua51", "luajit20", "luajit21"])
+def test_modload_cannot_reach_python_debug_ffi_or_host_io(
+    tmp_path: Path, runtime: str
+) -> None:
+    mod = make_mod(
+        tmp_path,
+        r'''
+assert(python == nil and python_eval == nil)
+assert(GLOBAL.python == nil and GLOBAL.python_eval == nil)
+assert(debug == nil and GLOBAL.debug == nil)
+assert(ffi == nil and GLOBAL.ffi == nil)
+assert(package.loadlib == nil and package.preload["ffi"] == nil)
+assert(package.loaded["ffi"] == nil and package.path == "" and package.cpath == "")
+assert(os.execute == nil and os.getenv == nil and os.remove == nil)
+assert(io.open == nil and io.popen == nil and io.lines == nil)
+local ok, value = pcall(function() return AddPrefabPostInit.__globals__ end)
+assert(ok == false or value == nil)
+''',
+    )
+    code, report = launch_worker(
+        RunConfig(
+            profile="modload",
+            runtime=runtime,
+            scripts_zip=str(SCRIPTS_ZIP),
+            mod=str(mod),
+        ),
+        10,
+    )
+    assert code == EXIT_OK
+    assert json.loads((report / "result.json").read_text("utf-8"))["status"] == "ok"

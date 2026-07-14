@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import heapq
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,12 +22,14 @@ class PlannedModule:
     api_version: str
     priority: int
     dependencies: tuple[str, ...]
+    profiles: tuple[str, ...]
     reasons: tuple[str, ...]
     root: Path
     source: str
     manifest_path: Path
     manifest_sha256: str
     entry_path: Path | None
+    entry_sha256: str | None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -36,12 +39,14 @@ class PlannedModule:
             "api_version": self.api_version,
             "priority": self.priority,
             "dependencies": list(self.dependencies),
+            "profiles": list(self.profiles),
             "reasons": list(self.reasons),
             "root": str(self.root),
             "source": self.source,
             "manifest_path": str(self.manifest_path),
             "manifest_sha256": self.manifest_sha256,
             "entry_path": None if self.entry_path is None else str(self.entry_path),
+            "entry_sha256": self.entry_sha256,
         }
 
 
@@ -56,6 +61,8 @@ class PlannedCase:
     manifest_path: Path
     manifest_sha256: str
     entry_path: Path | None
+    entry_sha256: str | None
+    profiles: tuple[str, ...]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -68,6 +75,8 @@ class PlannedCase:
             "manifest_path": str(self.manifest_path),
             "manifest_sha256": self.manifest_sha256,
             "entry_path": None if self.entry_path is None else str(self.entry_path),
+            "entry_sha256": self.entry_sha256,
+            "profiles": list(self.profiles),
         }
 
 
@@ -262,6 +271,7 @@ class ExtensionPlanner:
             api_version=manifest.api_version,
             priority=manifest.priority,
             dependencies=manifest.dependencies,
+            profiles=manifest.profiles,
             reasons=tuple(sorted(reasons)),
             root=record.root,
             source=record.source,
@@ -269,6 +279,13 @@ class ExtensionPlanner:
             manifest_sha256=record.manifest_sha256,
             entry_path=(
                 None if manifest.entry is None else record.root / Path(manifest.entry)
+            ),
+            entry_sha256=(
+                None
+                if manifest.entry is None
+                else hashlib.sha256(
+                    (record.root / Path(manifest.entry)).read_bytes()
+                ).hexdigest().upper()
             ),
         )
 
@@ -287,4 +304,12 @@ class ExtensionPlanner:
             entry_path=(
                 None if manifest.entry is None else record.root / Path(manifest.entry)
             ),
+            entry_sha256=(
+                None
+                if manifest.entry is None
+                else hashlib.sha256(
+                    (record.root / Path(manifest.entry)).read_bytes()
+                ).hexdigest().upper()
+            ),
+            profiles=manifest.profiles,
         )

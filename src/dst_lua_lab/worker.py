@@ -34,22 +34,21 @@ return function(capture, fixed_epoch)
         end
     end
     local original_date = os.date
+    local original_difftime = os.difftime
+    os = {}
     os.time = function(_) return fixed_epoch end
     os.date = function(format, time)
         return original_date(format, time or fixed_epoch)
     end
-    os.execute = nil
-    os.remove = nil
-    os.rename = nil
-    os.tmpname = nil
-    os.getenv = nil
-    io.popen = nil
-    io.open = nil
-    io.input = nil
-    io.output = nil
-    package.loadlib = nil
-    package.path = ""
-    package.cpath = ""
+    os.difftime = original_difftime
+    io = {}
+    package = { loaded = {}, preload = {}, path = "", cpath = "" }
+    python = nil
+    debug = nil
+    ffi = nil
+    module = nil
+    local jit_version = jit and jit.version or nil
+    jit = jit_version and { version = jit_version } or nil
     require = function(name)
         error("UNSUPPORTED require outside VFS: " .. tostring(name), 2)
     end
@@ -64,20 +63,19 @@ end
 SECURITY_BOOTSTRAP = br"""
 return function(fixed_epoch)
     local original_date = os.date
+    local original_difftime = os.difftime
+    os = {}
     os.time = function(_) return fixed_epoch end
     os.date = function(format, time) return original_date(format, time or fixed_epoch) end
-    os.execute = nil
-    os.remove = nil
-    os.rename = nil
-    os.tmpname = nil
-    os.getenv = nil
-    io.popen = nil
-    io.open = nil
-    io.input = nil
-    io.output = nil
-    package.loadlib = nil
-    package.path = ""
-    package.cpath = ""
+    os.difftime = original_difftime
+    io = {}
+    package = { loaded = {}, preload = {}, path = "", cpath = "" }
+    python = nil
+    debug = nil
+    ffi = nil
+    module = nil
+    local jit_version = jit and jit.version or nil
+    jit = jit_version and { version = jit_version } or nil
     dofile = nil
     loadfile = nil
 end
@@ -121,7 +119,10 @@ def _run_extension_bootstraps(
     phase: str,
     trace: TraceRecorder,
     executor: Any | None = None,
-) -> None:
+    *,
+    defer_callable_results: bool = False,
+) -> tuple[tuple[str, Any], ...]:
+    deferred: list[tuple[str, Any]] = []
     for bootstrap in session.bootstraps(phase):
         trace.emit(
             "extension.bootstrap",
@@ -138,7 +139,11 @@ def _run_extension_bootstraps(
             else executor(bootstrap.data, ("@extension:" + str(bootstrap.path)).encode("utf-8"))
         )
         if callable(result):
-            result()
+            if defer_callable_results:
+                deferred.append((bootstrap.extension_id, result))
+            else:
+                result()
+    return tuple(deferred)
 
 
 def _extension_native_dispatch(
@@ -200,6 +205,7 @@ def run_algorithm(config: RunConfig, trace: TraceRecorder, session: ExtensionSes
     globals_[b"DSTLAB_USERID"] = config.userid.encode("utf-8")
     globals_[b"DSTLAB_FIXED_TIME"] = config.fixed_time.encode("utf-8")
     globals_[b"DSTLAB_SEED"] = config.seed
+    globals_[b"DSTLAB_PROFILE"] = config.profile.encode("utf-8")
     _apply_extension_globals(lua, globals_, session)
 
     def extension_native(name: Any, *args: Any) -> Any:
@@ -238,6 +244,7 @@ def run_algorithm(config: RunConfig, trace: TraceRecorder, session: ExtensionSes
     _run_extension_bootstraps(lua, session, "post_mod", trace)
     return {
         "status": "ok",
+        "profile": config.profile,
         "runtime": config.runtime,
         "runtime_metadata": runtime_metadata,
         "entry": display,
@@ -463,7 +470,12 @@ def run_modload(config: RunConfig, trace: TraceRecorder, session: ExtensionSessi
             capture_registration(kind, "rpc" if "RPC" in kind else category, args)
             if "RPC" in kind:
                 session.notify_rpc(
-                    {"operation": "register", "kind": kind, "args": item["args"], "profile": "modload"}
+                    {
+                        "operation": "register",
+                        "kind": kind,
+                        "args": item["args"],
+                        "profile": config.profile,
+                    }
                 )
             return None
 
@@ -477,9 +489,11 @@ def run_modload(config: RunConfig, trace: TraceRecorder, session: ExtensionSessi
 
     def native_dispatch(name: Any, *args: Any) -> Any:
         api = text(name)
-        call = {"api": api, "args": safe_value(args), "profile": "modload"}
+        call = {"api": api, "args": safe_value(args), "profile": config.profile}
         native_calls.append(call)
-        handled, value = _extension_native_dispatch(session, trace, "modload", api, args)
+        handled, value = _extension_native_dispatch(
+            session, trace, config.profile, api, args
+        )
         if handled:
             call["extension_id"] = session.native_owners[api]
             call["handled"] = True
@@ -503,7 +517,7 @@ def run_modload(config: RunConfig, trace: TraceRecorder, session: ExtensionSessi
         item = {
             "api": api,
             "args": safe_value(args),
-            "profile": "modload",
+            "profile": config.profile,
             "active_patches": [],
             "recommendation": "add a verified Native Shim, Patch, or mark the call unsupported",
         }
@@ -525,12 +539,17 @@ def run_modload(config: RunConfig, trace: TraceRecorder, session: ExtensionSessi
     globals_[b"DSTLAB_USERID"] = config.userid.encode("utf-8")
     globals_[b"DSTLAB_FIXED_TIME"] = config.fixed_time.encode("utf-8")
     globals_[b"DSTLAB_SEED"] = config.seed
+    globals_[b"DSTLAB_PROFILE"] = config.profile.encode("utf-8")
     lua.execute(f"math.randomseed({config.seed})".encode("ascii"))
     globals_[b"TheSim"] = proxy_factory(b"TheSim", native_dispatch)
     globals_[b"TheNet"] = proxy_factory(b"TheNet", native_dispatch)
     globals_[b"modname"] = Path(config.mod).name.encode("utf-8")
     globals_[b"modroot"] = (str(Path(config.mod)) + os.sep).encode("utf-8")
     globals_[b"MODROOT"] = globals_[b"modroot"]
+    globals_[b"DSTLAB_MODS_TO_LOAD"] = _lua_value(
+        lua,
+        [Path(config.mod).name, *(Path(path).name for path in config.dependencies)],
+    )
     globals_[b"require"] = require_module
     globals_[b"modimport"] = modimport
     globals_[b"GetModConfigData"] = get_config
@@ -541,7 +560,7 @@ def run_modload(config: RunConfig, trace: TraceRecorder, session: ExtensionSessi
                 "operation": text(operation),
                 "kind": text(kind),
                 "args": safe_value(args),
-                "profile": "modload",
+                "profile": config.profile,
             }
         )
 
@@ -615,17 +634,58 @@ def run_modload(config: RunConfig, trace: TraceRecorder, session: ExtensionSessi
     mod_env[b"Class"] = class_value
 
     extension_executor = lambda source, chunkname: runner(source, chunkname, mod_env)
-    _run_extension_bootstraps(lua, session, "pre_mod", trace, extension_executor)
+    deferred_post_mod = _run_extension_bootstraps(
+        lua,
+        session,
+        "pre_mod",
+        trace,
+        extension_executor,
+        defer_callable_results=True,
+    )
 
     modinfo = vfs.resolve("modinfo.lua", caller="modload")
     trace.emit("mod.entry", "MOD_REAL", "EXECUTED", kind="modinfo", uri=modinfo.uri, sha256=modinfo.sha256)
     runner(modinfo.data, ("@" + modinfo.uri).encode("utf-8"), mod_env)
     capture_mod_config_defaults()
+    mod_info = lua.table()
+    for field in (
+        b"name",
+        b"description",
+        b"author",
+        b"version",
+        b"api_version",
+        b"dst_compatible",
+        b"client_only_mod",
+        b"all_clients_require_mod",
+        b"server_only_mod",
+    ):
+        value = mod_env[field]
+        if value is not None:
+            mod_info[field] = value
+    globals_[b"DSTLAB_MOD_INFO"] = mod_info
+    known_mod_index = globals_[b"KnownModIndex"]
+    if known_mod_index is not None:
+        savedata = known_mod_index[b"savedata"]
+        known_mods = None if savedata is None else savedata[b"known_mods"]
+        if known_mods is not None:
+            record = lua.table()
+            record[b"modinfo"] = mod_info
+            known_mods[globals_[b"modname"]] = record
     modmain = vfs.resolve("modmain.lua", caller="modload")
     trace.emit("mod.entry", "MOD_REAL", "EXECUTED", kind="modmain", uri=modmain.uri, sha256=modmain.sha256)
     report_dir = Path(config.report_dir)
     try:
         runner(modmain.data, ("@" + modmain.uri).encode("utf-8"), mod_env)
+        for extension_id, callback in deferred_post_mod:
+            trace.emit(
+                "extension.bootstrap_callback",
+                "EXTENSION",
+                "EXECUTED",
+                extension_id=extension_id,
+                phase="post_mod",
+                private=True,
+            )
+            callback()
         _run_extension_bootstraps(lua, session, "post_mod", trace, extension_executor)
     except Exception as exc:
         if unsupported:
@@ -651,7 +711,7 @@ def run_modload(config: RunConfig, trace: TraceRecorder, session: ExtensionSessi
         )
     return {
         "status": "ok",
-        "profile": "modload",
+        "profile": config.profile,
         "runtime": config.runtime,
         "runtime_metadata": runtime_metadata,
         "mod": config.mod,
@@ -685,16 +745,19 @@ def main(argv: list[str] | None = None) -> int:
             "scripts_zip": config.scripts_zip,
             "work_dir": config.work_dir,
             "report_dir": config.report_dir,
+            "replay_plan": config.replay_plan,
         },
     )
+    after_run_attempted = False
     try:
         session.load_plan(config.extension_plan or {})
         if config.profile == "algorithm":
             result = run_algorithm(config, trace, session)
-        elif config.profile == "modload":
+        elif config.profile in ("modload", "frontend", "server-sim"):
             result = run_modload(config, trace, session)
         else:
             raise ValueError(f"profile not implemented: {config.profile}")
+        after_run_attempted = True
         session.run_after(result)
         result["management_only"] = False
         result["extensions"] = session.report()
@@ -703,17 +766,35 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         tb = traceback.format_exc()
         trace.emit("runtime.error", "UNSUPPORTED", "FAILED", error_type=type(exc).__name__, message=str(exc))
+        error_result = {
+            "status": "error",
+            "profile": config.profile,
+            "runtime": config.runtime,
+            "management_only": False,
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+            "traceback": tb,
+        }
+        if not after_run_attempted:
+            try:
+                after_run_attempted = True
+                session.run_after(error_result)
+            except Exception as after_exc:
+                error_result["after_run_error"] = {
+                    "error_type": type(after_exc).__name__,
+                    "message": str(after_exc),
+                }
+                trace.emit(
+                    "extension.after_run_error",
+                    "EXTENSION",
+                    "FAILED",
+                    error_type=type(after_exc).__name__,
+                    message=str(after_exc),
+                )
+        error_result["extensions"] = session.report()
         _write_json(
             result_path,
-            {
-                "status": "error",
-                "runtime": config.runtime,
-                "management_only": False,
-                "extensions": session.report(),
-                "error_type": type(exc).__name__,
-                "message": str(exc),
-                "traceback": tb,
-            },
+            error_result,
         )
         (report_dir / "errors.txt").write_text(tb, "utf-8")
         if isinstance(exc, MissingNativeRunError):

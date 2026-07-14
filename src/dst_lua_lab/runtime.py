@@ -19,6 +19,12 @@ class UnsupportedRuntime(ValueError):
     pass
 
 
+def _deny_python_attribute(_obj: Any, attribute: Any, _is_setting: bool) -> None:
+    raise AttributeError(
+        f"Python attribute access is disabled in DST Lua Lab: {attribute!r}"
+    )
+
+
 @dataclass(slots=True)
 class RuntimeAdapter:
     runtime_id: str
@@ -28,7 +34,18 @@ class RuntimeAdapter:
         if not module_name:
             raise UnsupportedRuntime(f"unsupported runtime: {self.runtime_id}")
         module = importlib.import_module(module_name)
-        return module.LuaRuntime(unpack_returned_tuples=True, encoding=None)
+        lua = module.LuaRuntime(
+            unpack_returned_tuples=True,
+            encoding=None,
+            register_eval=False,
+            register_builtins=False,
+            attribute_filter=_deny_python_attribute,
+        )
+        lua.execute(
+            b"python=nil; python_eval=nil; debug=nil; ffi=nil; "
+            b"if package then package.preload={}; package.loaded.ffi=nil end"
+        )
+        return lua
 
     @staticmethod
     def metadata(lua: Any) -> dict[str, Any]:

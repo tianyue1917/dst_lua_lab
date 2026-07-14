@@ -6,5 +6,5 @@ api_version = "1"
 priority = 220
 dependencies = []
 conflicts = []
-profiles = ["modload"]
+profiles = ["modload", "frontend", "server-sim"]
 entry = "plugin.py"

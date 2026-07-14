@@ -28,7 +28,9 @@ def _make_plan(tmp_path: Path, plugin: str) -> dict[str, object]:
         "manifest_path": str(manifest.resolve()),
         "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest().upper(),
         "entry_path": str(entry.resolve()),
+        "entry_sha256": hashlib.sha256(entry.read_bytes()).hexdigest().upper(),
         "dependencies": [],
+        "profiles": ["algorithm"],
     }
     return {"modules": [item], "case": None, "dependency_order": ["runtime_test"]}
 
@@ -76,3 +78,19 @@ def test_register_exception_is_an_explicit_config_failure(tmp_path: Path) -> Non
     assert code == EXIT_CONFIG_ERROR
     assert result["error_type"] == "ExtensionRuntimeError"
     assert "register(context) failed" in result["message"]
+
+
+def test_worker_rejects_entry_changed_after_planning(tmp_path: Path) -> None:
+    plan = _make_plan(tmp_path, "def register(context):\n    pass\n")
+    entry = Path(plan["modules"][0]["entry_path"])
+    entry.write_text(
+        "def register(context):\n    raise RuntimeError('replacement executed')\n",
+        "utf-8",
+    )
+    code, report_dir = launch_worker(
+        RunConfig(source="return 1", extension_plan=plan), 5
+    )
+    result = json.loads((report_dir / "result.json").read_text("utf-8"))
+    assert code == EXIT_CONFIG_ERROR
+    assert "entry changed after planning" in result["message"]
+    assert "replacement executed" not in result["message"]

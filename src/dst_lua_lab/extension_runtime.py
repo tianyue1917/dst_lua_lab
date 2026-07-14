@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import importlib.util
+import copy
 import hashlib
 import json
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType, ModuleType
 from typing import Any, Callable, Mapping
 
 
@@ -78,7 +79,7 @@ class ExtensionContext:
 
     @property
     def config(self) -> Mapping[str, Any]:
-        return self._session.public_config
+        return MappingProxyType(copy.deepcopy(self._session.public_config))
 
     def read_bytes(self, relative_path: str) -> bytes:
         return _scoped_path(self.root, relative_path).read_bytes()
@@ -151,7 +152,7 @@ class ExtensionSession:
 
     def __init__(self, *, profile: str, config: Mapping[str, Any] | None = None) -> None:
         self.profile = profile
-        self.public_config = dict(config or {})
+        self.public_config = copy.deepcopy(dict(config or {}))
         self.loaded_extensions: list[dict[str, Any]] = []
         self.contributions: list[dict[str, Any]] = []
         self.lua_bootstraps: list[LuaBootstrap] = []
@@ -203,7 +204,15 @@ class ExtensionSession:
 
     def _skip_legacy_management_item(self, plan: Mapping[str, Any], item: Any, kind: str) -> bool:
         """Accept phase-one evidence-only records without mistaking them for executable entries."""
-        required = ("api_version", "root", "manifest_path", "manifest_sha256", "entry_path")
+        required = (
+            "api_version",
+            "root",
+            "manifest_path",
+            "manifest_sha256",
+            "entry_path",
+            "entry_sha256",
+            "profiles",
+        )
         if bool(plan.get("management_only")) and isinstance(item, Mapping) and any(
             field not in item for field in required
         ):
@@ -225,6 +234,17 @@ class ExtensionSession:
         if api_version != EXTENSION_API_VERSION:
             raise ExtensionRuntimeError(
                 f"unsupported extension API {api_version!r} for {extension_id}; Worker supports {EXTENSION_API_VERSION!r}"
+            )
+        profiles = item.get("profiles")
+        if not isinstance(profiles, list) or any(
+            not isinstance(profile, str) for profile in profiles
+        ):
+            raise ExtensionRuntimeError(
+                f"planned {kind} {extension_id} profiles must be a list of strings"
+            )
+        if profiles and self.profile not in profiles:
+            raise ExtensionRuntimeError(
+                f"planned {kind} {extension_id} does not support profile {self.profile!r}"
             )
         if kind == "module":
             dependencies = item.get("dependencies", [])
@@ -255,6 +275,7 @@ class ExtensionSession:
                 f"expected {expected_manifest_sha!r}, actual {actual_manifest_sha}"
             )
         entry_raw = item.get("entry_path")
+        expected_entry_sha = item.get("entry_sha256")
         loaded = {
             "id": extension_id,
             "kind": kind,
@@ -276,22 +297,46 @@ class ExtensionSession:
                 raise ExtensionRuntimeError(f"entry point escapes extension root: {entry}") from exc
             if not entry.is_file():
                 raise ExtensionRuntimeError(f"entry point does not exist: {entry}")
+            entry_data = entry.read_bytes()
+            actual_entry_sha = hashlib.sha256(entry_data).hexdigest().upper()
+            if (
+                not isinstance(expected_entry_sha, str)
+                or actual_entry_sha != expected_entry_sha.upper()
+            ):
+                raise ExtensionRuntimeError(
+                    f"entry changed after planning for {extension_id}: "
+                    f"expected {expected_entry_sha!r}, actual {actual_entry_sha}"
+                )
             loaded["entry_path"] = str(entry)
-            loaded["entry_sha256"] = hashlib.sha256(entry.read_bytes()).hexdigest().upper()
-            self._execute_entry(extension_id, kind, root, api_version, entry)
+            loaded["entry_sha256"] = actual_entry_sha
+            self._execute_entry(
+                extension_id, kind, root, api_version, entry, entry_data
+            )
         else:
+            if expected_entry_sha is not None:
+                raise ExtensionRuntimeError(
+                    f"planned {kind} {extension_id} has entry_sha256 without entry_path"
+                )
             loaded["status"] = "loaded_no_entry"
         self.loaded_extensions.append(loaded)
 
-    def _execute_entry(self, extension_id: str, kind: str, root: Path, api_version: str, entry: Path) -> None:
+    def _execute_entry(
+        self,
+        extension_id: str,
+        kind: str,
+        root: Path,
+        api_version: str,
+        entry: Path,
+        entry_data: bytes,
+    ) -> None:
         module_name = f"_dstlab_extension_{kind}_{extension_id}_{id(self):x}"
-        spec = importlib.util.spec_from_file_location(module_name, entry)
-        if spec is None or spec.loader is None:
-            raise ExtensionRuntimeError(f"cannot create loader for extension {extension_id}: {entry}")
-        module = importlib.util.module_from_spec(spec)
+        module = ModuleType(module_name)
+        module.__file__ = str(entry)
+        module.__package__ = ""
         before_path = list(sys.path)
         try:
-            spec.loader.exec_module(module)
+            code = compile(entry_data, str(entry), "exec")
+            exec(code, module.__dict__)
             register = getattr(module, "register", None)
             if not callable(register):
                 raise ExtensionRuntimeError(f"extension {extension_id} entry must define register(context)")

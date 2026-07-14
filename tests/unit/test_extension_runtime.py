@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from dst_lua_lab.extension_runtime import ExtensionRuntimeError, ExtensionSession
+from dst_lua_lab.extension_runtime import (
+    ExtensionContext,
+    ExtensionRuntimeError,
+    ExtensionSession,
+)
 
 
 def _plan_item(root: Path, extension_id: str, *, dependencies: list[str] | None = None) -> dict[str, object]:
@@ -19,7 +23,9 @@ def _plan_item(root: Path, extension_id: str, *, dependencies: list[str] | None 
         "manifest_path": str(manifest.resolve()),
         "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest().upper(),
         "entry_path": str((root / "plugin.py").resolve()),
+        "entry_sha256": hashlib.sha256((root / "plugin.py").read_bytes()).hexdigest().upper(),
         "dependencies": dependencies or [],
+        "profiles": ["algorithm"],
     }
 
 
@@ -38,6 +44,14 @@ def test_runtime_accepts_the_manifest_identifier_language(tmp_path: Path, extens
         {"modules": [_plan_item(root, extension_id)]}, profile="algorithm"
     )
     assert session.loaded_extensions[0]["id"] == extension_id
+
+
+def test_runtime_rejects_extension_profile_mismatch(tmp_path: Path) -> None:
+    root = _module(tmp_path, "profile_test")
+    item = _plan_item(root, "profile_test")
+    item["profiles"] = ["modload"]
+    with pytest.raises(ExtensionRuntimeError, match="does not support profile"):
+        ExtensionSession.from_plan({"modules": [item]}, profile="algorithm")
 
 
 def test_global_names_and_scoped_reads_are_restricted(tmp_path: Path) -> None:
@@ -77,3 +91,17 @@ def test_entry_does_not_pollute_sys_path(tmp_path: Path) -> None:
     before = list(sys.path)
     ExtensionSession.from_plan({"modules": [_plan_item(root, "path_test")]}, profile="algorithm")
     assert sys.path == before
+
+
+def test_extension_config_view_cannot_mutate_shared_session(tmp_path: Path) -> None:
+    session = ExtensionSession(
+        profile="algorithm", config={"nested": {"value": 1}}
+    )
+    context = ExtensionContext(
+        "config_test", "module", tmp_path, "1", "algorithm", session
+    )
+    view = context.config
+    with pytest.raises(TypeError):
+        view["new"] = True  # type: ignore[index]
+    view["nested"]["value"] = 2
+    assert context.config["nested"]["value"] == 1

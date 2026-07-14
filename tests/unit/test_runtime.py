@@ -17,6 +17,12 @@ def test_vm_state_is_isolated() -> None:
     assert second.globals()[b"DSTLAB_LEAK"] is None
 
 
+def test_python_bridge_is_not_registered() -> None:
+    for runtime_id in ("lua51", "luajit20", "luajit21"):
+        lua = RuntimeAdapter(runtime_id).create()
+        assert lua.execute(b"return python == nil and python_eval == nil") is True
+
+
 def test_bytes_are_serialized_without_nul_loss() -> None:
     value = safe_value(b"A\x00\xffB")
     assert value["length"] == 4

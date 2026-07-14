@@ -6,8 +6,9 @@ ID、账号、兑换码、目标 Hash 或真实 MOD 文件。
 它声明 `example_trace` 为必需 Module，用于证明 Case 选择时会自动把依赖纳入
 `ExtensionPlan`。此自动解析不等同于在 `.dstlab/state.json` 中永久启用 Module。
 
-第一阶段只实现管理平面，`adapter.py` 不会被 CLI 的 `list`、`validate` 或
-`doctor` 导入。待第二阶段 Worker API 实现后，它才可在隔离进程中注册声明式断言。
+`list`、`validate`、`doctor` 只读取 Manifest，不导入 `adapter.py`。使用
+`run --case example_case` 时，隔离 Worker 会校验计划 Hash 后执行
+`register(context)` 并记录声明式断言贡献。
 
 典型流程：
 

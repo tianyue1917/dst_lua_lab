@@ -1,4 +1,7 @@
 local function cap(name, ...) DSTLAB_NATIVE("DSTLab.Runtime.Event", name, ...) end
+local profile = GLOBAL.DSTLAB_PROFILE or "modload"
+local is_frontend = profile == "frontend"
+local is_server_sim = profile == "server-sim"
 local function Vector3(x,y,z) return {x=x or 0,y=y or 0,z=z or 0,Get=function(s)return s.x,s.y,s.z end} end
 GLOBAL.Vector3 = GLOBAL.Vector3 or Vector3
 GLOBAL.BRANCH = GLOBAL.BRANCH or "release"
@@ -110,19 +113,19 @@ function GLOBAL.CreateEntity()
 end
 function GLOBAL.SpawnPrefab(name) local i=GLOBAL.CreateEntity(); i.prefab=name; cap("entity.SpawnPrefab",name,i.GUID); return i end
 
-local world={ismastersim=true,ismastershard=true,tags={},state={},GUID=1}
+local world={ismastersim=not is_frontend,ismastershard=not is_frontend,tags={},state={},GUID=1}
 function world:AddTag(t) self.tags[t]=true; cap("world.AddTag",t) end
 function world:RemoveTag(t) self.tags[t]=nil; cap("world.RemoveTag",t) end
 function world:HasTag(t) return self.tags[t]==true end
 GLOBAL.TheWorld=world
 local original_net = GLOBAL.TheNet
 local net_fixture = {
- GetIsDedicated=function()cap("net.GetIsDedicated");return false end,
- IsDedicated=function()cap("net.IsDedicated");return false end,
- GetIsServer=function()cap("net.GetIsServer");return true end,
- GetIsClient=function()cap("net.GetIsClient");return false end,
+ GetIsDedicated=function()cap("net.GetIsDedicated");return is_server_sim end,
+ IsDedicated=function()cap("net.IsDedicated");return is_server_sim end,
+ GetIsServer=function()cap("net.GetIsServer");return not is_frontend end,
+ GetIsClient=function()cap("net.GetIsClient");return is_frontend end,
  GetIsServerAdmin=function()cap("net.GetIsServerAdmin");return false end,
- GetServerIsClientHosted=function()cap("net.GetServerIsClientHosted");return true end,
+ GetServerIsClientHosted=function()cap("net.GetServerIsClientHosted");return not is_server_sim end,
  GetServerGameMode=function()cap("net.GetServerGameMode");return "survival" end,
  GetUserID=function()cap("net.GetUserID");return GLOBAL.DSTLAB_USERID or "KU_OFFLINE" end,
 }
@@ -130,6 +133,18 @@ local net_fixture = {
 -- visible in unsupported.json instead of degrading into silent nil values.
 if original_net ~= nil then setmetatable(net_fixture, {__index=original_net}) end
 GLOBAL.TheNet=net_fixture
+GLOBAL.DSTLAB_ROLE={profile=profile,is_frontend=is_frontend,is_server=not is_frontend,is_dedicated=is_server_sim}
+if is_frontend and GLOBAL.ThePlayer==nil then local p=GLOBAL.CreateEntity(); p.prefab="wilson"; p:AddTag("player"); GLOBAL.ThePlayer=p end
+local mod_index={savedata={known_mods={}}}
+local selected_mods={}
+for _,name in ipairs(GLOBAL.DSTLAB_MODS_TO_LOAD or {GLOBAL.modname}) do selected_mods[name]=true end
+function mod_index:GetModActualName(name) cap("mod_index.GetModActualName",name); return name end
+function mod_index:IsModEnabled(name) cap("mod_index.IsModEnabled",name); return selected_mods[name]==true end
+function mod_index:DoesModExist(name) cap("mod_index.DoesModExist",name); return selected_mods[name]==true end
+function mod_index:GetModsToLoad(usecached) cap("mod_index.GetModsToLoad",usecached); return GLOBAL.DSTLAB_MODS_TO_LOAD or {GLOBAL.modname} end
+function mod_index:GetModInfo(name) cap("mod_index.GetModInfo",name); if name==GLOBAL.modname then return GLOBAL.DSTLAB_MOD_INFO end; return nil end
+setmetatable(mod_index,{__index=function(_,key)return function(_,...)return DSTLAB_NATIVE("KnownModIndex."..tostring(key),...)end end})
+GLOBAL.KnownModIndex=GLOBAL.KnownModIndex or mod_index
 GLOBAL.TheInput={IsKeyDown=function(_,k)cap("input.IsKeyDown",k);return false end,IsControlPressed=function(_,c)cap("input.IsControlPressed",c);return false end,ControllerAttached=function()cap("input.ControllerAttached");return false end,GetWorldPosition=function()cap("input.GetWorldPosition");return Vector3() end,GetScreenPosition=function()cap("input.GetScreenPosition");return Vector3() end,GetHUDEntityUnderMouse=function()cap("input.GetHUDEntityUnderMouse");return nil end}
 local front={_screens={}}; function front:GetActiveScreen()return self._screens[#self._screens] end; function front:GetFocusWidget()cap("frontend.GetFocusWidget");return nil end; function front:PushScreen(s)table.insert(self._screens,s);cap("frontend.PushScreen")end; function front:PopScreen()local s=table.remove(self._screens);cap("frontend.PopScreen");return s end; GLOBAL.TheFrontEnd=front
 

@@ -22,12 +22,30 @@ def register(context: Any) -> None:
         path_text = raw_path.decode("utf-8", "replace") if isinstance(raw_path, bytes) else str(raw_path or "")
         mode = raw_mode.decode("ascii", "replace") if isinstance(raw_mode, bytes) else str(raw_mode or "r")
         if mode not in {"r", "rb"}:
+            events["file.denied"] += 1
+            call.emit(
+                "filesystem.fixture_deny",
+                "FIXTURE",
+                "DENIED",
+                path=path_text,
+                mode=mode,
+                reason="read_only_policy",
+            )
             return None, f"DST Lua Lab scoped io.open is read-only: {mode}".encode()
         candidate = Path(path_text)
         if not candidate.is_absolute() and allowed_roots:
             candidate = allowed_roots[0] / candidate
         resolved = candidate.resolve()
         if not any(resolved == root or resolved.is_relative_to(root) for root in allowed_roots):
+            events["file.denied"] += 1
+            call.emit(
+                "filesystem.fixture_deny",
+                "FIXTURE",
+                "DENIED",
+                path=str(resolved),
+                mode=mode,
+                reason="outside_mounted_roots",
+            )
             return None, f"path is outside mounted MOD roots: {resolved}".encode("utf-8")
         if not resolved.is_file():
             return None, f"file not found: {resolved}".encode("utf-8")

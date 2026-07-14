@@ -17,6 +17,10 @@ from .manifest import (
 from .state import ExtensionState, StateError, StateStore
 
 
+_PACKAGE_DIR = Path(__file__).resolve().parent
+_BUNDLED_EXTENSIONS_ROOT = _PACKAGE_DIR / "_bundled"
+
+
 class RegistryError(ValueError):
     """Extension discovery or a registry lifecycle operation failed."""
 
@@ -70,9 +74,12 @@ class ExtensionRegistry:
         self,
         lab_root: Path | str,
         state_store: StateStore | None = None,
+        *,
+        include_packaged: bool = False,
     ) -> None:
         self.lab_root = Path(lab_root).resolve()
         self.state_store = state_store or StateStore(self.lab_root)
+        self.include_packaged = include_packaged
 
     def discover(self) -> ExtensionCatalog:
         state = self.state_store.load()
@@ -186,24 +193,49 @@ class ExtensionRegistry:
         return CaseValidation(case_id, True, True, not errors, tuple(errors))
 
     def _discover_builtin_modules(self) -> dict[str, DiscoveredModule]:
-        base = self.lab_root / "modules"
         records: dict[str, DiscoveredModule] = {}
-        for root in self._builtin_roots(base, "module.toml"):
-            record = self._module_record(root, "builtin")
-            if record.manifest.id in records:
-                raise RegistryError(f"duplicate module id: {record.manifest.id}")
-            records[record.manifest.id] = record
+        for base, source in self._builtin_search_roots("modules"):
+            for root in self._builtin_roots(base, "module.toml"):
+                record = self._module_record(root, source)
+                if record.manifest.id in records:
+                    previous = records[record.manifest.id]
+                    raise RegistryError(
+                        f"duplicate module id {record.manifest.id!r}: "
+                        f"{previous.root} and {record.root}"
+                    )
+                records[record.manifest.id] = record
         return records
 
     def _discover_builtin_cases(self) -> dict[str, DiscoveredCase]:
-        base = self.lab_root / "casepacks"
         records: dict[str, DiscoveredCase] = {}
-        for root in self._builtin_roots(base, "case.toml"):
-            record = self._case_record(root, "builtin")
-            if record.manifest.id in records:
-                raise RegistryError(f"duplicate case id: {record.manifest.id}")
-            records[record.manifest.id] = record
+        for base, source in self._builtin_search_roots("casepacks"):
+            for root in self._builtin_roots(base, "case.toml"):
+                record = self._case_record(root, source)
+                if record.manifest.id in records:
+                    previous = records[record.manifest.id]
+                    raise RegistryError(
+                        f"duplicate case id {record.manifest.id!r}: "
+                        f"{previous.root} and {record.root}"
+                    )
+                records[record.manifest.id] = record
         return records
+
+    def _builtin_search_roots(self, collection: str) -> tuple[tuple[Path, str], ...]:
+        """Return checkout extensions and, for wheel CLI use, packaged ones.
+
+        Temporary/custom ``ExtensionRegistry`` roots intentionally do not see
+        global packaged extensions.  This preserves isolation for embedders and
+        tests while making the installed ``dstlab`` command behave like a
+        source checkout.
+        """
+
+        primary = self.lab_root / collection
+        roots: list[tuple[Path, str]] = [(primary, "builtin")]
+        if self.include_packaged:
+            bundled = _BUNDLED_EXTENSIONS_ROOT / collection
+            if bundled.resolve() != primary.resolve():
+                roots.append((bundled, "packaged"))
+        return tuple(roots)
 
     @staticmethod
     def _builtin_roots(base: Path, manifest_name: str) -> tuple[Path, ...]:

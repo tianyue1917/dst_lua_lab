@@ -17,9 +17,69 @@ from typing import Any
 
 from .config import EXIT_CONFIG_ERROR, EXIT_INTERNAL, EXIT_TIMEOUT, RunConfig
 from .manifest import ManifestError, validate_extension_id
+from .settings import SettingsStore
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_CHECKOUT_ROOT = Path(__file__).resolve().parents[2]
+_PACKAGE_IMPORT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _installed_lab_home() -> Path:
+    explicit = os.environ.get("DSTLAB_HOME")
+    if explicit:
+        return Path(explicit).expanduser().absolute()
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        root = Path(base) if base else Path.home() / "AppData" / "Local"
+    else:
+        root = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return (root / "dst-lua-lab").absolute()
+
+
+PROJECT_ROOT = (
+    _CHECKOUT_ROOT
+    if (_CHECKOUT_ROOT / "dstlab.py").is_file()
+    else _installed_lab_home()
+)
+MOD_PROFILES = ("modload", "frontend", "server-sim")
+RUNTIME_CHOICES = ("lua51", "luajit20", "luajit21")
+
+
+def _path_is_reparse_point(path: Path) -> bool:
+    if not os.path.lexists(path):
+        return False
+    info = path.lstat()
+    attributes = getattr(info, "st_file_attributes", 0)
+    return path.is_symlink() or bool(
+        attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+def _create_generated_run_dir(kind: str, namespace: str, run_id: str) -> Path:
+    raw_root = PROJECT_ROOT.expanduser().absolute()
+    if _path_is_reparse_point(raw_root):
+        raise ValueError(f"Lab root cannot be a symlink or reparse point: {raw_root}")
+    raw_root.mkdir(parents=True, exist_ok=True)
+    lab_root = raw_root.resolve()
+    base = raw_root / kind
+    if _path_is_reparse_point(base):
+        raise ValueError(f"generated root cannot be a symlink or reparse point: {base}")
+    base.mkdir(exist_ok=True)
+    if base.resolve().parent != lab_root:
+        raise ValueError(f"generated root escapes Lab root: {base.resolve()}")
+    namespace_root = base / namespace
+    if _path_is_reparse_point(namespace_root):
+        raise ValueError(
+            f"generated namespace cannot be a symlink or reparse point: {namespace_root}"
+        )
+    namespace_root.mkdir(exist_ok=True)
+    if namespace_root.resolve().parent != base.resolve():
+        raise ValueError(f"generated namespace escapes root: {namespace_root.resolve()}")
+    target = namespace_root / run_id
+    if os.path.lexists(target):
+        raise FileExistsError(f"generated run already exists: {target}")
+    target.mkdir()
+    return target
 
 
 def _jsonable(value: Any) -> Any:
@@ -74,10 +134,8 @@ def launch_worker(config: RunConfig, timeout: float) -> tuple[int, Path]:
     run_id = config.run_id or make_run_id()
     config.run_id = run_id
     namespace = _validate_extension_id(config.case_id) if config.case_id else "_core"
-    report_dir = PROJECT_ROOT / "reports" / namespace / run_id
-    work_dir = PROJECT_ROOT / "work" / namespace / run_id
-    report_dir.mkdir(parents=True, exist_ok=False)
-    work_dir.mkdir(parents=True, exist_ok=False)
+    report_dir = _create_generated_run_dir("reports", namespace, run_id)
+    work_dir = _create_generated_run_dir("work", namespace, run_id)
     config.report_dir = str(report_dir)
     config.work_dir = str(work_dir)
     if not config.extension_plan:
@@ -128,9 +186,19 @@ def launch_worker(config: RunConfig, timeout: float) -> tuple[int, Path]:
         write_json(report_dir / artifact, empty)
 
     env = os.environ.copy()
-    src = str(PROJECT_ROOT / "src")
-    env["PYTHONPATH"] = src + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    command = [sys.executable, "-m", "dst_lua_lab.worker", "--request", str(request_path)]
+    # Always re-import the same installed/checkout package in the Worker.
+    # Never prepend a user-selected Lab workspace's ``src`` directory.
+    src = str(_PACKAGE_IMPORT_ROOT)
+    env["PYTHONPATH"] = src
+    env["PYTHONSAFEPATH"] = "1"
+    command = [
+        sys.executable,
+        "-P",
+        "-m",
+        "dst_lua_lab.worker",
+        "--request",
+        str(request_path),
+    ]
     started = time.monotonic()
     try:
         completed = subprocess.run(
@@ -141,6 +209,7 @@ def launch_worker(config: RunConfig, timeout: float) -> tuple[int, Path]:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            cwd=work_dir,
         )
         exit_code = completed.returncode
         stdout, stderr = completed.stdout, completed.stderr
@@ -209,28 +278,53 @@ def inspect_mod(path: Path) -> int:
 
 
 def command_run(args: argparse.Namespace) -> int:
-    if args.case and args.mod:
+    replay_plan = _load_replay_plan(args.replay_plan)
+    replay_requested = args.replay_plan is not None
+    if replay_requested and args.profile == "algorithm":
+        raise ValueError("--replay-plan requires a MOD profile")
+    case_id = args.case
+    if case_id is None:
+        case_id = {
+            "frontend": "frontend_mod_debug",
+            "server-sim": "server_sim_debug",
+        }.get(args.profile)
+    requested_modules = list(args.module or [])
+    if replay_requested and "controlled_replay" not in requested_modules:
+        requested_modules.append("controlled_replay")
+    scripts_zip = args.scripts_zip
+    if args.profile in MOD_PROFILES:
+        if not args.mod:
+            raise ValueError(f"{args.profile} profile requires --mod")
+        scripts_zip = str(_debug_scripts_zip(args.scripts_zip))
+    if case_id and args.mod:
         _, registry, _ = _extension_services()
-        validation = registry.validate_case(args.case, Path(args.mod).resolve())
+        validation = registry.validate_case(case_id, Path(args.mod).resolve())
         if validation.target_matched is False:
             raise ValueError(
-                f"target MOD does not match case {args.case!r}: "
+                f"target MOD does not match case {case_id!r}: "
                 + "; ".join(validation.errors)
             )
-    plan = resolve_extension_plan(args.case, args.module or [])
+        record = registry.discover().cases[case_id]
+        if record.manifest.profiles and args.profile not in record.manifest.profiles:
+            raise ValueError(
+                f"case {case_id!r} does not declare profile {args.profile!r}; "
+                f"expected one of {', '.join(record.manifest.profiles)}"
+            )
+    plan = resolve_extension_plan(case_id, requested_modules, profile=args.profile)
     config = RunConfig(
         profile=args.profile,
         runtime=args.runtime,
         entry=args.entry,
         source=args.source,
-        scripts_zip=args.scripts_zip,
+        scripts_zip=scripts_zip,
         mod=args.mod,
         dependencies=args.dependency or [],
         userid=args.userid,
         fixed_time=args.fixed_time,
         seed=args.seed,
-        case_id=args.case,
-        requested_modules=args.module or [],
+        case_id=case_id,
+        requested_modules=requested_modules,
+        replay_plan=replay_plan,
         extension_plan=plan,
         management_only=bool(plan.get("management_only", True)),
     )
@@ -239,18 +333,48 @@ def command_run(args: argparse.Namespace) -> int:
     return code
 
 
+def _scripts_zip_candidate(explicit: str | None) -> tuple[Path, str]:
+    if explicit:
+        return Path(explicit).expanduser().resolve(), "explicit"
+    environment = os.environ.get("DSTLAB_SCRIPTS_ZIP")
+    if environment:
+        return Path(environment).expanduser().resolve(), "environment"
+    configured = SettingsStore(PROJECT_ROOT).load().scripts_zip
+    if configured:
+        return Path(configured).expanduser().resolve(), "configured"
+    return (PROJECT_ROOT.parent / "scripts.zip").resolve(), "default"
+
+
 def _debug_scripts_zip(explicit: str | None) -> Path:
-    candidate = Path(explicit).expanduser() if explicit else PROJECT_ROOT.parent / "scripts.zip"
+    candidate, source = _scripts_zip_candidate(explicit)
     candidate = candidate.resolve()
     if not candidate.is_file():
-        source = "--scripts-zip" if explicit else "automatic default"
         raise FileNotFoundError(
             f"DST scripts archive not found ({source}): {candidate}; "
-            "export scripts.zip from the game data or pass --scripts-zip PATH"
+            "configure it with 'dstlab config set-scripts-zip PATH' or pass --scripts-zip PATH"
         )
     if not zipfile.is_zipfile(candidate):
         raise ValueError(f"DST scripts archive is not a valid ZIP file: {candidate}")
     return candidate
+
+
+def _load_replay_plan(path: str | None) -> list[dict[str, Any]]:
+    if path is None:
+        return []
+    source = Path(path).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"replay plan does not exist or is not a file: {source}")
+    if source.stat().st_size > 1024 * 1024:
+        raise ValueError(f"replay plan exceeds 1 MiB: {source}")
+    try:
+        value = json.loads(source.read_text("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read replay plan {source}: {exc}") from exc
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise ValueError("replay plan must be a JSON array of objects")
+    if len(value) > 100:
+        raise ValueError("replay plan cannot contain more than 100 operations")
+    return value
 
 
 def command_debug_mod(args: argparse.Namespace) -> int:
@@ -262,10 +386,16 @@ def command_debug_mod(args: argparse.Namespace) -> int:
     if missing:
         raise ValueError(f"MOD directory is missing required file(s): {', '.join(missing)}")
     scripts_zip = _debug_scripts_zip(args.scripts_zip)
-    case_id = "general_mod_debug"
-    plan = resolve_extension_plan(case_id, [])
+    case_id = {
+        "modload": "general_mod_debug",
+        "frontend": "frontend_mod_debug",
+        "server-sim": "server_sim_debug",
+    }[args.profile]
+    replay_plan = _load_replay_plan(args.replay_plan)
+    requested_modules = ["controlled_replay"] if args.replay_plan is not None else []
+    plan = resolve_extension_plan(case_id, requested_modules, profile=args.profile)
     config = RunConfig(
-        profile="modload",
+        profile=args.profile,
         runtime=args.runtime,
         scripts_zip=str(scripts_zip),
         mod=str(mod),
@@ -274,6 +404,8 @@ def command_debug_mod(args: argparse.Namespace) -> int:
         fixed_time=args.fixed_time,
         seed=args.seed,
         case_id=case_id,
+        requested_modules=requested_modules,
+        replay_plan=replay_plan,
         extension_plan=plan,
         management_only=bool(plan.get("management_only", True)),
     )
@@ -299,6 +431,7 @@ def command_debug_mod(args: argparse.Namespace) -> int:
         loaded_extensions = []
     diagnostic = {
         "status": result.get("status", "worker_crash"),
+        "profile": result.get("profile", args.profile),
         "error_type": result.get("error_type"),
         "message": str(result.get("message", ""))[:500] or None,
         "lua_modules": int(result.get("modules_loaded", len(loaded_lua_modules)) or 0),
@@ -327,11 +460,18 @@ def _extension_services():
     from .state import StateStore
 
     store = StateStore(PROJECT_ROOT)
-    registry = ExtensionRegistry(PROJECT_ROOT, state_store=store)
+    registry = ExtensionRegistry(
+        PROJECT_ROOT, state_store=store, include_packaged=True
+    )
     return store, registry, ExtensionPlanner
 
 
-def resolve_extension_plan(case_id: str | None, requested_modules: list[str]) -> dict[str, Any]:
+def resolve_extension_plan(
+    case_id: str | None,
+    requested_modules: list[str],
+    *,
+    profile: str | None = None,
+) -> dict[str, Any]:
     if case_id:
         _validate_extension_id(case_id)
     for module_id in requested_modules:
@@ -340,6 +480,21 @@ def resolve_extension_plan(case_id: str | None, requested_modules: list[str]) ->
     catalog = registry.discover()
     state = store.load()
     plan = planner_type(catalog, state).resolve(case_id=case_id, requested_modules=requested_modules)
+    if profile is not None:
+        if case_id is not None:
+            declared = catalog.cases[case_id].manifest.profiles
+            if declared and profile not in declared:
+                raise ValueError(
+                    f"case {case_id!r} does not support profile {profile!r}; "
+                    f"expected one of {', '.join(declared)}"
+                )
+        for item in plan.modules:
+            declared = catalog.modules[item.id].manifest.profiles
+            if declared and profile not in declared:
+                raise ValueError(
+                    f"module {item.id!r} does not support profile {profile!r}; "
+                    f"expected one of {', '.join(declared)}"
+                )
     value = _jsonable(plan.to_dict())
     # Phase one is management-plane only. Do not imply that an entry was loaded.
     value["management_only"] = True
@@ -368,6 +523,17 @@ def _record_summary(
 
 
 def command_module(args: argparse.Namespace) -> int:
+    if args.module_command == "init":
+        from .scaffold import create_module
+
+        module_id = _validate_extension_id(args.module_id)
+        _, registry, _ = _extension_services()
+        if module_id in registry.discover().modules:
+            raise ValueError(f"module id is already reserved: {module_id}")
+        PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
+        files = create_module(PROJECT_ROOT, module_id)
+        print(json.dumps({"id": module_id, "created": files}, ensure_ascii=False, indent=2))
+        return 0
     store, registry, planner_type = _extension_services()
     if args.module_command == "doctor":
         try:
@@ -441,11 +607,7 @@ def _generated_namespace(kind: str, case_id: str) -> Path:
 
 
 def _is_reparse_point(path: Path) -> bool:
-    if not path.exists() and not path.is_symlink():
-        return False
-    info = path.lstat()
-    attributes = getattr(info, "st_file_attributes", 0)
-    return path.is_symlink() or bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+    return _path_is_reparse_point(path)
 
 
 def _assert_no_reparse_points(root: Path) -> None:
@@ -474,6 +636,17 @@ def clean_case_generated(case_id: str) -> list[str]:
 def command_case(args: argparse.Namespace) -> int:
     from .manifest import load_case_manifest
 
+    if args.case_command == "init":
+        from .scaffold import create_case
+
+        case_id = _validate_extension_id(args.case_id)
+        _, registry, _ = _extension_services()
+        if case_id in registry.discover().cases:
+            raise ValueError(f"case id is already reserved: {case_id}")
+        PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
+        files = create_case(PROJECT_ROOT, case_id)
+        print(json.dumps({"id": case_id, "created": files}, ensure_ascii=False, indent=2))
+        return 0
     store, registry, planner_type = _extension_services()
     if args.case_command == "mount":
         root = Path(args.path).resolve()
@@ -522,8 +695,9 @@ def command_case(args: argparse.Namespace) -> int:
         if not tests_dir.is_dir():
             raise ValueError(f"case has no tests directory: {tests_dir}")
         env = os.environ.copy()
-        src = str(PROJECT_ROOT / "src")
-        env["PYTHONPATH"] = src + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        src = str(_PACKAGE_IMPORT_ROOT)
+        env["PYTHONPATH"] = src
+        env["PYTHONSAFEPATH"] = "1"
         completed = subprocess.run([sys.executable, "-m", "pytest", "-q", str(tests_dir)], cwd=PROJECT_ROOT, env=env)
         if not validation.manifest_valid:
             return EXIT_CONFIG_ERROR
@@ -536,7 +710,7 @@ def command_case(args: argparse.Namespace) -> int:
         return 0
     if args.case_command == "unmount":
         record = catalog.cases.get(case_id)
-        if record is not None and record.source == "builtin":
+        if record is not None and record.source in {"builtin", "packaged"}:
             raise ValueError(f"cannot unmount built-in case: {case_id}")
         removed = clean_case_generated(case_id) if args.purge_generated else []
         new_state = registry.unmount_case(case_id)
@@ -585,6 +759,49 @@ def command_missing(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_doctor(args: argparse.Namespace) -> int:
+    from .doctor import run_doctor
+
+    archive, source = _scripts_zip_candidate(args.scripts_zip)
+    _, registry, _ = _extension_services()
+    report = run_doctor(
+        PROJECT_ROOT,
+        scripts_zip=archive,
+        scripts_zip_source=source,
+        mod=args.mod,
+        dependencies=args.dependency or [],
+        runtime=args.runtime,
+        registry=registry,
+        launcher=("python", "dstlab.py")
+        if (PROJECT_ROOT / "dstlab.py").is_file()
+        else ("dstlab",),
+    )
+    if args.json:
+        print(report.to_json())
+    else:
+        for check in report.checks:
+            print(f"[{check.status.upper():4}] {check.id}: {check.summary}")
+        if report.suggested_debug_command is not None:
+            print("suggested=" + report.suggested_debug_command.display)
+        print(f"doctor_ok={str(report.ok).lower()}")
+    return 0 if report.ok else EXIT_CONFIG_ERROR
+
+
+def command_config(args: argparse.Namespace) -> int:
+    store = SettingsStore(PROJECT_ROOT)
+    if args.config_command == "show":
+        settings = store.load()
+    elif args.config_command == "set-scripts-zip":
+        archive = _debug_scripts_zip(args.path)
+        settings = store.set_scripts_zip(archive)
+    elif args.config_command == "clear-scripts-zip":
+        settings = store.clear_scripts_zip()
+    else:
+        return EXIT_CONFIG_ERROR
+    print(json.dumps(settings.to_dict(), ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dstlab")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -593,17 +810,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     debug = sub.add_parser("debug-mod", help="debug a MOD with the general_mod_debug Case Pack")
     debug.add_argument("--mod", required=True)
+    debug.add_argument("--profile", default="modload", choices=MOD_PROFILES)
     debug.add_argument("--scripts-zip")
+    debug.add_argument("--replay-plan")
     debug.add_argument("--dependency", action="append")
-    debug.add_argument("--runtime", default="luajit20")
+    debug.add_argument("--runtime", default="luajit20", choices=RUNTIME_CHOICES)
     debug.add_argument("--userid", default="KU_OFFLINE")
     debug.add_argument("--fixed-time", default="2099-01-01T00:00:00Z")
     debug.add_argument("--seed", type=int, default=12345)
     debug.add_argument("--timeout", type=float, default=10.0)
 
     run = sub.add_parser("run")
-    run.add_argument("--profile", default="algorithm", choices=["algorithm", "modload"])
-    run.add_argument("--runtime", default="luajit20")
+    run.add_argument("--profile", default="algorithm", choices=["algorithm", *MOD_PROFILES])
+    run.add_argument("--runtime", default="luajit20", choices=RUNTIME_CHOICES)
     run.add_argument("--entry")
     run.add_argument("--source")
     run.add_argument("--scripts-zip")
@@ -611,6 +830,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--dependency", action="append")
     run.add_argument("--case")
     run.add_argument("--module", action="append")
+    run.add_argument("--replay-plan")
     run.add_argument("--userid", default="KU_OFFLINE")
     run.add_argument("--fixed-time", default="2099-01-01T00:00:00Z")
     run.add_argument("--seed", type=int, default=12345)
@@ -625,6 +845,20 @@ def build_parser() -> argparse.ArgumentParser:
     missing = sub.add_parser("list-missing-api")
     missing.add_argument("--report", required=True)
 
+    doctor = sub.add_parser("doctor", help="check runtimes, scripts.zip, MOD inputs, and extensions")
+    doctor.add_argument("--scripts-zip")
+    doctor.add_argument("--mod")
+    doctor.add_argument("--dependency", action="append")
+    doctor.add_argument("--runtime", default="luajit20", choices=RUNTIME_CHOICES)
+    doctor.add_argument("--json", action="store_true")
+
+    config = sub.add_parser("config", help="manage local untracked Lab settings")
+    config_sub = config.add_subparsers(dest="config_command", required=True)
+    config_sub.add_parser("show")
+    config_set_scripts = config_sub.add_parser("set-scripts-zip")
+    config_set_scripts.add_argument("path")
+    config_sub.add_parser("clear-scripts-zip")
+
     module = sub.add_parser("module")
     module_sub = module.add_subparsers(dest="module_command", required=True)
     module_sub.add_parser("list")
@@ -633,10 +867,14 @@ def build_parser() -> argparse.ArgumentParser:
     module_disable = module_sub.add_parser("disable")
     module_disable.add_argument("module_id")
     module_sub.add_parser("doctor")
+    module_init = module_sub.add_parser("init")
+    module_init.add_argument("module_id")
 
     case = sub.add_parser("case")
     case_sub = case.add_subparsers(dest="case_command", required=True)
     case_sub.add_parser("list")
+    case_init = case_sub.add_parser("init")
+    case_init.add_argument("case_id")
     case_mount = case_sub.add_parser("mount")
     case_mount.add_argument("path")
     case_validate = case_sub.add_parser("validate")
@@ -665,6 +903,10 @@ def main(argv: list[str] | None = None) -> int:
             return command_diff(args)
         if args.command == "list-missing-api":
             return command_missing(args)
+        if args.command == "doctor":
+            return command_doctor(args)
+        if args.command == "config":
+            return command_config(args)
         if args.command == "module":
             return command_module(args)
         if args.command == "case":

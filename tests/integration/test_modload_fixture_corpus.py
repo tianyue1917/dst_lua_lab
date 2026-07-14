@@ -37,14 +37,6 @@ def _tree_hash(root: Path) -> dict[str, str]:
     }
 
 
-def _lua_tree_hash(root: Path) -> dict[str, str]:
-    return {
-        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted(root.rglob("*.lua"))
-        if path.is_file()
-    }
-
-
 def _extension_plan(
     *module_ids: str, case_id: str | None = None
 ) -> dict[str, Any]:
@@ -66,6 +58,7 @@ def _run_fixture(
     modules: tuple[str, ...] = (),
     dependencies: tuple[Path, ...] = (),
     case_id: str | None = None,
+    profile: str = "modload",
 ) -> tuple[int, Path, Path]:
     plan = (
         _extension_plan(*modules, case_id=case_id)
@@ -73,7 +66,7 @@ def _run_fixture(
         else {}
     )
     config = RunConfig(
-        profile="modload",
+        profile=profile,
         scripts_zip=str(SCRIPTS_ZIP),
         mod=str(FIXTURE_ROOT / fixture),
         dependencies=[str(path) for path in dependencies],
@@ -118,6 +111,8 @@ def test_fixture_corpus_is_synthetic_and_self_contained() -> None:
         "prefab_asset",
         "recipe_action_stategraph",
         "world_entity_rpc",
+        "profile_roles",
+        "known_mod_index",
     }
     assert expected <= {path.name for path in FIXTURE_ROOT.iterdir() if path.is_dir()}
     combined = b"\n".join(path.read_bytes() for path in FIXTURE_ROOT.rglob("*.lua"))
@@ -331,9 +326,19 @@ def test_world_entity_and_rpc_identity_are_offline_and_traceable() -> None:
         _cleanup(report, work)
 
 
-def test_runtime_baseline_preserves_unknown_thenet_native_failure() -> None:
+@pytest.mark.parametrize(
+    ("profile", "case_id"),
+    [
+        ("modload", "general_mod_debug"),
+        ("frontend", "frontend_mod_debug"),
+        ("server-sim", "server_sim_debug"),
+    ],
+)
+def test_runtime_baseline_preserves_unknown_thenet_native_failure(
+    profile: str, case_id: str
+) -> None:
     code, report, work = _run_fixture(
-        "world_unknown_native", case_id="general_mod_debug"
+        "world_unknown_native", case_id=case_id, profile=profile
     )
     try:
         assert code == EXIT_MISSING_NATIVE
@@ -341,6 +346,8 @@ def test_runtime_baseline_preserves_unknown_thenet_native_failure() -> None:
         assert [item["api"] for item in unsupported] == [
             "TheNet.DefinitelyMissingFromFixture"
         ]
+        assert unsupported[0]["profile"] == profile
+        assert _read_json(report, "result.json")["profile"] == profile
         assert "verified Native Shim" in unsupported[0]["recommendation"]
     finally:
         _cleanup(report, work)
@@ -360,6 +367,49 @@ def test_runtime_baseline_scopes_io_to_read_only_mod_roots() -> None:
         _cleanup(report, work)
 
 
+@pytest.mark.parametrize(
+    ("profile", "case_id"),
+    [
+        ("frontend", "frontend_mod_debug"),
+        ("server-sim", "server_sim_debug"),
+    ],
+)
+def test_profile_role_fixtures_are_distinct(
+    profile: str, case_id: str
+) -> None:
+    code, report, work = _run_fixture(
+        "profile_roles", case_id=case_id, profile=profile
+    )
+    try:
+        assert code == EXIT_OK
+        result = _read_json(report, "result.json")
+        assert result["profile"] == profile
+        runtime = _extension_output(report, "dst_runtime_baseline")
+        assert runtime["real_engine"] is False
+        assert _read_json(report, "unsupported.json") == []
+    finally:
+        _cleanup(report, work)
+
+
+def test_known_mod_index_exposes_only_verified_common_queries() -> None:
+    code, report, work = _run_fixture(
+        "known_mod_index",
+        case_id="general_mod_debug",
+        dependencies=(FIXTURE_ROOT / "cross_mod_dependency",),
+    )
+    try:
+        assert code == EXIT_OK
+        runtime = _extension_output(report, "dst_runtime_baseline")
+        assert runtime["events"]["mod_index.GetModActualName"] == 1
+        assert runtime["events"]["mod_index.IsModEnabled"] == 4
+        assert runtime["events"]["mod_index.DoesModExist"] == 3
+        assert runtime["events"]["mod_index.GetModsToLoad"] == 1
+        assert runtime["events"]["mod_index.GetModInfo"] == 2
+        assert _read_json(report, "unsupported.json") == []
+    finally:
+        _cleanup(report, work)
+
+
 @pytest.mark.skipif(
     SMOKE_MOD is None
     or SMOKE_SCRIPTS_ZIP is None
@@ -371,7 +421,7 @@ def test_existing_mod_entry_smoke_is_read_only_and_reports_earliest_gap() -> Non
     assert SMOKE_MOD is not None
     assert SMOKE_SCRIPTS_ZIP is not None
     mod = SMOKE_MOD
-    before = _lua_tree_hash(mod)
+    before = _tree_hash(mod)
     plan = _extension_plan(case_id="general_mod_debug")
     config = RunConfig(
         profile="modload",
@@ -398,6 +448,6 @@ def test_existing_mod_entry_smoke_is_read_only_and_reports_earliest_gap() -> Non
         assert _read_json(report, "persistence.json") == []
         trace_text = (report / "trace.jsonl").read_text("utf-8")
         assert '"type": "mod.entry"' in trace_text
-        assert before == _lua_tree_hash(mod)
+        assert before == _tree_hash(mod)
     finally:
         _cleanup(report, work)

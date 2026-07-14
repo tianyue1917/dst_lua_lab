@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +14,16 @@ from .manifest import ManifestError, validate_extension_id
 
 class StateError(ValueError):
     """The local extension state is malformed or cannot be updated safely."""
+
+
+def _is_reparse_point(path: Path) -> bool:
+    if not os.path.lexists(path):
+        return False
+    info = path.lstat()
+    attributes = getattr(info, "st_file_attributes", 0)
+    return path.is_symlink() or bool(
+        attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,14 +46,18 @@ class ExtensionState:
 
 class StateStore:
     def __init__(self, lab_root: Path | str, path: Path | str | None = None) -> None:
-        self.lab_root = Path(lab_root).resolve()
-        self.path = (
-            Path(path).resolve()
-            if path is not None
-            else self.lab_root / ".dstlab" / "state.json"
-        )
+        raw_root = Path(lab_root).expanduser().absolute()
+        if _is_reparse_point(raw_root):
+            raise StateError(f"Lab root cannot be a symlink or reparse point: {raw_root}")
+        self.lab_root = raw_root.resolve()
+        raw_path = Path(path).expanduser().absolute() if path is not None else self.lab_root / ".dstlab" / "state.json"
+        if not raw_path.is_relative_to(self.lab_root):
+            raise StateError(f"extension state must stay inside Lab root: {raw_path}")
+        self.path = raw_path
 
     def load(self) -> ExtensionState:
+        if _is_reparse_point(self.path.parent) or _is_reparse_point(self.path):
+            raise StateError("extension state paths cannot be symlinks or reparse points")
         if not self.path.exists():
             return ExtensionState()
         try:
@@ -107,6 +122,10 @@ class StateStore:
             state.to_dict(), ensure_ascii=False, indent=2, sort_keys=True
         ) + "\n"
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if _is_reparse_point(self.path.parent) or (
+            self.path.exists() and _is_reparse_point(self.path)
+        ):
+            raise StateError("extension state paths cannot be symlinks or reparse points")
         temporary: str | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -132,7 +151,6 @@ class StateStore:
                     Path(temporary).unlink()
                 except OSError:
                     pass
-
     def enable_module(self, module_id: str) -> ExtensionState:
         validate_extension_id(module_id, "module id")
         state = self.load()

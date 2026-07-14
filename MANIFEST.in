@@ -1,0 +1,14 @@
+include LICENSE
+include README.md
+include CHANGELOG.md
+include pyproject.toml
+include setup.py
+include dstlab.py
+graft modules
+graft casepacks
+graft docs
+include tools/scan_sensitive.py
+recursive-exclude modules */tests/*
+recursive-exclude casepacks */tests/*
+global-exclude *.py[cod]
+global-exclude __pycache__
