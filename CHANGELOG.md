@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+### Fixed
+
+- Force text fixtures to LF on every checkout so the Windows and Linux CI matrix exercises identical Lua input bytes.
+- Update GitHub Actions to their Node.js 24-based major versions.
+
 ## 0.1.0
 
 Initial public release.
