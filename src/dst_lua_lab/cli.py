@@ -602,7 +602,7 @@ def build_parser() -> argparse.ArgumentParser:
     debug.add_argument("--timeout", type=float, default=10.0)
 
     run = sub.add_parser("run")
-    run.add_argument("--profile", default="algorithm", choices=["algorithm", "modload", "frontend", "server-sim"])
+    run.add_argument("--profile", default="algorithm", choices=["algorithm", "modload"])
     run.add_argument("--runtime", default="luajit20")
     run.add_argument("--entry")
     run.add_argument("--source")
