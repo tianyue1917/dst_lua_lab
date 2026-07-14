@@ -1,0 +1,6 @@
+local file, err = io.open(MODROOT .. "fixture.txt", "r")
+assert(file ~= nil, err)
+assert(file:read("*a") == "fixture-data\n")
+assert(file:close())
+local output, write_err = io.open(MODROOT .. "forbidden.txt", "w")
+assert(output == nil and string.find(write_err, "read%-only") ~= nil)

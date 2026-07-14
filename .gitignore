@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-generated/
+.venv/
+.dstlab/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+work/*
+!work/.gitkeep
+reports/*
+!reports/.gitkeep
+
+# Local game/mod inputs and credentials are never repository content.
+/scripts.zip
+/mods/
+/workshop-*/
+*.log
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+cluster_token.txt

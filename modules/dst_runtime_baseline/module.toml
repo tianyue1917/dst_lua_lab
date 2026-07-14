@@ -1,0 +1,10 @@
+schema = 1
+id = "dst_runtime_baseline"
+name = "DST runtime shape baseline"
+version = "1.0.0"
+api_version = "1"
+priority = 80
+dependencies = []
+conflicts = []
+profiles = ["modload"]
+entry = "plugin.py"

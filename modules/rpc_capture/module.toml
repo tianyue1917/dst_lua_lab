@@ -1,0 +1,10 @@
+schema = 1
+id = "rpc_capture"
+name = "RPC capture"
+version = "1.0.0"
+api_version = "1"
+priority = 200
+dependencies = []
+conflicts = []
+profiles = ["modload"]
+entry = "plugin.py"

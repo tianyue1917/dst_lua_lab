@@ -1,0 +1,10 @@
+schema = 1
+id = "strict_env"
+name = "DST strict mod environment"
+version = "1.0.0"
+api_version = "1"
+priority = 100
+dependencies = []
+conflicts = []
+profiles = ["modload"]
+entry = "plugin.py"

@@ -1,0 +1,10 @@
+schema = 1
+id = "scheduler_trace"
+name = "Deterministic scheduler trace"
+version = "1.0.0"
+api_version = "1"
+priority = 220
+dependencies = []
+conflicts = []
+profiles = ["modload"]
+entry = "plugin.py"

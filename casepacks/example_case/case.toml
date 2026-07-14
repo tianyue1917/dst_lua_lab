@@ -1,0 +1,12 @@
+schema = 1
+id = "example_case"
+name = "Synthetic case pack"
+version = "1.0.0"
+api_version = "1"
+required_modules = ["example_trace"]
+optional_modules = []
+profiles = ["algorithm", "modload"]
+entry = "adapter.py"
+
+[match]
+required_files = ["modinfo.lua", "modmain.lua"]

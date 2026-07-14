@@ -1,0 +1,10 @@
+schema = 1
+id = "persistence_trace"
+name = "Isolated persistence trace"
+version = "1.0.0"
+api_version = "1"
+priority = 210
+dependencies = []
+conflicts = []
+profiles = ["modload"]
+entry = "plugin.py"

@@ -1,0 +1,2 @@
+-- This file is intentionally not executed when the directory is used only as
+-- a VFS dependency of cross_mod_target.
